@@ -1,0 +1,5 @@
+{
+  "name": "Veritas: L'Enquêteur du Vrai",
+  "description": "Un module de formation immersif et innovant sur les fake news, mêlant storytelling, quiz et intelligence artificielle.",
+  "requestFramePermissions": ["microphone"]
+}
