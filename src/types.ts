@@ -30,7 +30,5 @@ export interface AppState {
   badges: string[];
   consecutiveCorrect: number;
   userAnswers: { questionId: number; isCorrect: boolean }[];
-  chatTurnCount: number;
-  adaptiveFeedback?: string;
   bgHue: number;
 }

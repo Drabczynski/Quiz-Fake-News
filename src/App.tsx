@@ -23,19 +23,9 @@ import {
   Zap,
   BrainCircuit
 } from 'lucide-react';
-import { GoogleGenAI, Modality } from "@google/genai";
 import { QUIZ_QUESTIONS } from './constants';
 import { QuestionType, AppState } from './types';
 import { scorm } from './scorm';
-
-declare global {
-  interface Window {
-    aistudio: {
-      hasSelectedApiKey: () => Promise<boolean>;
-      openSelectKey: () => Promise<void>;
-    };
-  }
-}
 
 const BADGES = [
   { id: 'novice', name: 'Novice', icon: <Star className="w-4 h-4" />, threshold: 0 },
@@ -54,13 +44,11 @@ export default function App() {
     badges: ['novice'],
     consecutiveCorrect: 0,
     userAnswers: [],
-    chatTurnCount: 0,
     bgHue: 240
   });
 
   const [selectedChoice, setSelectedChoice] = useState<string | null>(null);
   const [showExplanation, setShowExplanation] = useState(false);
-  const [apiKeyError, setApiKeyError] = useState(false);
   const nextButtonRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const isCompletedRef = useRef(false);
@@ -155,7 +143,8 @@ export default function App() {
         level: newLevel,
         badges: newBadges,
         consecutiveCorrect: newConsecutive,
-        userAnswers: [...prev.userAnswers, { questionId: currentQuestion.id, isCorrect }]
+        userAnswers: [...prev.userAnswers, { questionId: currentQuestion.id, isCorrect }],
+        adaptiveFeedback: null // Reset feedback for each answer
       };
 
       // Update SCORM score
@@ -164,8 +153,8 @@ export default function App() {
       const scaledScore = rawScore / totalQuestions;
       scorm.setScore(rawScore, 0, totalQuestions, scaledScore);
 
-      // Update SCORM Objective "Fake News"
-      scorm.setObjective("Fake News", scaledScore, scaledScore >= 0.7 ? "passed" : "failed");
+      // Update SCORM Objective "1" - "Fake News"
+      scorm.setObjective("1", "Fake News", scaledScore, scaledScore >= 0.7 ? "passed" : "failed");
 
       // Record SCORM Interaction
       const learnerResponse = currentQuestion.type === QuestionType.TRUE_FALSE 
@@ -182,35 +171,14 @@ export default function App() {
         currentQuestion.text,
         learnerResponse,
         isCorrect ? "correct" : "incorrect",
-        correctAnswer
+        correctAnswer,
+        "1"
       );
 
       return updatedState;
     });
 
     setShowExplanation(true);
-    
-    // Adaptive AI Feedback (Async)
-    if (isCorrect && newConsecutive >= 2) {
-      setState(prev => ({ ...prev, adaptiveFeedback: "Bravo ! Tu as l'œil. Tu deviens vraiment bon pour voir les pièges." }));
-    } else if (!isCorrect) {
-      try {
-        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
-        const model = "gemini-3-flash-preview";
-        const response = await ai.models.generateContent({
-          model,
-          contents: [{ role: 'user', parts: [{ text: `L'utilisateur a fait une erreur sur : "${currentQuestion.text}". L'explication est : "${currentQuestion.explanation}". Donne un conseil tout simple (1 phrase) avec des mots faciles pour ne plus se faire avoir.` }] }]
-        });
-        const feedback = response.text || "C'est pas grave, on apprend de ses erreurs !";
-        setState(prev => ({ ...prev, adaptiveFeedback: feedback }));
-      } catch (error: any) {
-        console.error("Feedback AI failed", error);
-        if (error?.message?.includes('429') || error?.message?.includes('quota') || error?.status === 429) {
-          setApiKeyError(true);
-        }
-        setState(prev => ({ ...prev, adaptiveFeedback: "C'est pas grave, on apprend de ses erreurs !" }));
-      }
-    }
   };
 
   const handleNextQuestion = () => {
@@ -310,11 +278,6 @@ export default function App() {
       animate={{ opacity: 1 }}
       className="max-w-2xl w-full space-y-8"
     >
-      <div className="flex items-center gap-4 text-indigo-400 font-mono text-sm">
-        <BrainCircuit className="w-5 h-5" />
-        <span>ANALYSE COGNITIVE EN COURS...</span>
-      </div>
-      
       <div className="space-y-6 text-3xl font-light leading-tight text-white italic">
         <motion.p
           initial={{ opacity: 0, x: -20 }}
@@ -379,9 +342,6 @@ export default function App() {
 
       <div className="space-y-4">
         <div className="flex items-center gap-2">
-          <div className={`px-3 py-1 rounded-full text-[10px] font-mono uppercase tracking-widest ${state.consecutiveCorrect >= 2 ? 'bg-red-500 text-white animate-pulse' : 'bg-indigo-500/20 text-indigo-300'}`}>
-            {state.consecutiveCorrect >= 2 ? 'Mode Challenge' : 'Analyse Standard'}
-          </div>
           <span className="text-xs font-mono text-zinc-500">Question {state.userAnswers.length + 1} / {QUIZ_QUESTIONS.length}</span>
         </div>
         <h2 className="text-4xl font-bold text-white leading-tight tracking-tight">
@@ -448,23 +408,12 @@ export default function App() {
                 <HelpCircle className="w-6 h-6" />
                 <span>DÉCRYPTAGE EXPERT</span>
               </div>
-              {state.adaptiveFeedback && (
-                <div className="flex items-center gap-2 text-yellow-500 text-xs font-mono bg-yellow-500/10 px-3 py-1 rounded-full">
-                  <Zap className="w-3 h-3" />
-                  <span>CONSEIL IA</span>
-                </div>
-              )}
             </div>
             
             <div className="space-y-4">
               <p className="text-zinc-200 text-lg leading-relaxed">
                 {currentQuestion.explanation}
               </p>
-              {state.adaptiveFeedback && (
-                <p className="text-indigo-200 italic border-l-2 border-indigo-500 pl-4 py-1">
-                  "{state.adaptiveFeedback}"
-                </p>
-              )}
             </div>
 
             <div ref={nextButtonRef} className="pt-4">
@@ -473,7 +422,7 @@ export default function App() {
                 onMouseEnter={playHoverSound}
                 className="w-full py-5 bg-indigo-600 text-white font-bold rounded-2xl hover:bg-indigo-500 transition-all flex items-center justify-center gap-3 text-xl shadow-lg shadow-indigo-600/20 cursor-pointer"
               >
-                ÉQUATION SUIVANTE <ArrowRight className="w-6 h-6" />
+                QUESTION SUIVANTE <ArrowRight className="w-6 h-6" />
               </button>
             </div>
           </motion.div>
@@ -534,7 +483,10 @@ export default function App() {
       </div>
 
       <button 
-        onClick={() => window.location.reload()}
+        onClick={() => {
+          scorm.resetInteractions();
+          window.location.reload();
+        }}
         onMouseEnter={playHoverSound}
         className="px-16 py-6 bg-white text-black font-black rounded-full hover:scale-105 transition-all shadow-2xl shadow-white/10 text-xl uppercase tracking-widest cursor-pointer"
       >
@@ -543,69 +495,8 @@ export default function App() {
     </motion.div>
   );
 
-  const handleSelectKey = async () => {
-    if (window.aistudio) {
-      try {
-        await window.aistudio.openSelectKey();
-        setApiKeyError(false);
-      } catch (error) {
-        console.error("Failed to open select key dialog", error);
-      }
-    }
-  };
-
   return (
     <div className="min-h-screen bg-[#0a0a14] text-zinc-100 flex flex-col selection:bg-indigo-500 selection:text-white font-sans">
-      {/* API Key Error Overlay */}
-      <AnimatePresence>
-        {apiKeyError && (
-          <motion.div 
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/80 backdrop-blur-md"
-          >
-            <motion.div 
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              className="max-w-md w-full bg-zinc-900 border border-white/10 p-8 rounded-[32px] text-center space-y-6 shadow-2xl"
-            >
-              <div className="w-16 h-16 bg-red-500/20 rounded-full flex items-center justify-center mx-auto">
-                <Zap className="w-8 h-8 text-red-500" />
-              </div>
-              <div className="space-y-2">
-                <h3 className="text-2xl font-bold text-white">Quota Épuisé</h3>
-                <p className="text-zinc-400 text-sm leading-relaxed">
-                  Le système a atteint sa limite d'utilisation gratuite. Pour continuer à utiliser les fonctions vocales et l'IA avancée, veuillez sélectionner votre propre clé API (projet payant requis).
-                </p>
-                <a 
-                  href="https://ai.google.dev/gemini-api/docs/billing" 
-                  target="_blank" 
-                  rel="noopener noreferrer"
-                  className="text-indigo-400 text-xs hover:underline block pt-2"
-                >
-                  En savoir plus sur la facturation Gemini API
-                </a>
-              </div>
-              <div className="flex flex-col gap-3">
-                <button 
-                  onClick={handleSelectKey}
-                  className="w-full py-4 bg-indigo-600 text-white font-bold rounded-2xl hover:bg-indigo-500 transition-all shadow-lg shadow-indigo-600/20 cursor-pointer"
-                >
-                  SÉLECTIONNER UNE CLÉ API
-                </button>
-                <button 
-                  onClick={() => setApiKeyError(false)}
-                  className="w-full py-4 bg-white/5 text-zinc-400 font-medium rounded-2xl hover:bg-white/10 transition-all cursor-pointer"
-                >
-                  Continuer sans IA (Mode Dégradé)
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
       {/* Background Atmosphere */}
       <div className="fixed inset-0 overflow-hidden pointer-events-none z-0">
         {/* Base Background Color */}
@@ -686,10 +577,8 @@ export default function App() {
       <footer className="relative z-50 p-6 border-t border-white/5 bg-black/20 backdrop-blur-xl flex justify-between items-center text-[10px] font-mono text-zinc-500 uppercase tracking-[0.3em]">
         <div className="flex gap-8">
           <span className="flex items-center gap-2"><div className="w-1 h-1 bg-emerald-500 rounded-full animate-ping" /> Système Actif</span>
-          <span className="hidden sm:inline">Noyau: Gemini 3 Flash</span>
         </div>
         <div className="flex gap-8">
-          <span className="hidden md:inline">Session: {state.userAnswers.length} Analyses</span>
           <span>{new Date().toLocaleTimeString()}</span>
         </div>
       </footer>
