@@ -22,7 +22,7 @@ export interface Question {
 }
 
 export interface AppState {
-  currentStep: 'intro' | 'story' | 'quiz' | 'chatbot' | 'results';
+  currentStep: 'intro' | 'story' | 'quiz' | 'results';
   currentQuestionIndex: number;
   score: number;
   points: number;

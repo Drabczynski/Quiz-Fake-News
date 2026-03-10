@@ -26,6 +26,7 @@ import {
 import { GoogleGenAI, Modality } from "@google/genai";
 import { QUIZ_QUESTIONS } from './constants';
 import { QuestionType, AppState } from './types';
+import { scorm } from './scorm';
 
 declare global {
   interface Window {
@@ -59,12 +60,10 @@ export default function App() {
 
   const [selectedChoice, setSelectedChoice] = useState<string | null>(null);
   const [showExplanation, setShowExplanation] = useState(false);
-  const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'ai', text: string }[]>([]);
-  const [userInput, setUserInput] = useState('');
-  const [isTyping, setIsTyping] = useState(false);
   const [apiKeyError, setApiKeyError] = useState(false);
-  const chatEndRef = useRef<HTMLDivElement>(null);
   const nextButtonRef = useRef<HTMLDivElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const isCompletedRef = useRef(false);
 
   const currentQuestion = QUIZ_QUESTIONS[state.currentQuestionIndex];
 
@@ -86,8 +85,15 @@ export default function App() {
   };
 
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [chatMessages]);
+    scorm.init();
+    scorm.setCompletionStatus('incomplete');
+    return () => {
+      if (!isCompletedRef.current) {
+        scorm.setExitStatus('suspend');
+      }
+      scorm.terminate();
+    };
+  }, []);
 
   useEffect(() => {
     if (showExplanation) {
@@ -96,6 +102,14 @@ export default function App() {
       }, 100);
     }
   }, [showExplanation]);
+
+  useEffect(() => {
+    if (state.currentStep === 'intro' && videoRef.current) {
+      videoRef.current.play().catch(err => {
+        console.warn("Autoplay failed:", err);
+      });
+    }
+  }, [state.currentStep]);
 
   const handleStart = () => {
     playSound(transitionSound);
@@ -132,12 +146,32 @@ export default function App() {
       }
     });
 
+    // Update state immediately to prevent race conditions
+    setState(prev => {
+      const updatedState = {
+        ...prev,
+        score: isCorrect ? prev.score + 1 : prev.score,
+        points: newPoints,
+        level: newLevel,
+        badges: newBadges,
+        consecutiveCorrect: newConsecutive,
+        userAnswers: [...prev.userAnswers, { questionId: currentQuestion.id, isCorrect }]
+      };
+
+      // Update SCORM score
+      const totalQuestions = QUIZ_QUESTIONS.length;
+      const rawScore = updatedState.score;
+      const scaledScore = rawScore / totalQuestions;
+      scorm.setScore(rawScore, 0, totalQuestions, scaledScore);
+
+      return updatedState;
+    });
+
     setShowExplanation(true);
     
-    // Adaptive AI Feedback
-    let adaptiveFeedback = "";
+    // Adaptive AI Feedback (Async)
     if (isCorrect && newConsecutive >= 2) {
-      adaptiveFeedback = "Bravo ! Tu as l'œil. Tu deviens vraiment bon pour voir les pièges.";
+      setState(prev => ({ ...prev, adaptiveFeedback: "Bravo ! Tu as l'œil. Tu deviens vraiment bon pour voir les pièges." }));
     } else if (!isCorrect) {
       try {
         const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
@@ -146,26 +180,16 @@ export default function App() {
           model,
           contents: [{ role: 'user', parts: [{ text: `L'utilisateur a fait une erreur sur : "${currentQuestion.text}". L'explication est : "${currentQuestion.explanation}". Donne un conseil tout simple (1 phrase) avec des mots faciles pour ne plus se faire avoir.` }] }]
         });
-        adaptiveFeedback = response.text || "";
+        const feedback = response.text || "C'est pas grave, on apprend de ses erreurs !";
+        setState(prev => ({ ...prev, adaptiveFeedback: feedback }));
       } catch (error: any) {
         console.error("Feedback AI failed", error);
         if (error?.message?.includes('429') || error?.message?.includes('quota') || error?.status === 429) {
           setApiKeyError(true);
         }
-        adaptiveFeedback = "C'est pas grave, on apprend de ses erreurs !";
+        setState(prev => ({ ...prev, adaptiveFeedback: "C'est pas grave, on apprend de ses erreurs !" }));
       }
     }
-
-    setState(prev => ({
-      ...prev,
-      score: isCorrect ? prev.score + 1 : prev.score,
-      points: newPoints,
-      level: newLevel,
-      badges: newBadges,
-      consecutiveCorrect: newConsecutive,
-      adaptiveFeedback,
-      userAnswers: [...prev.userAnswers, { questionId: currentQuestion.id, isCorrect }]
-    }));
   };
 
   const handleNextQuestion = () => {
@@ -173,18 +197,17 @@ export default function App() {
     setShowExplanation(false);
     setSelectedChoice(null);
     
-    if (state.currentQuestionIndex === 2 && state.currentStep !== 'chatbot') {
-      setState(prev => ({ ...prev, currentStep: 'chatbot' }));
-      startChatbotSession();
-      return;
-    }
-
     // Dynamic Difficulty Selection
     const answeredIds = state.userAnswers.map(a => a.questionId);
     const remainingQuestions = QUIZ_QUESTIONS.filter(q => !answeredIds.includes(q.id));
 
     if (remainingQuestions.length === 0) {
+      isCompletedRef.current = true;
       setState(prev => ({ ...prev, currentStep: 'results' }));
+      scorm.setCompletionStatus('completed');
+      const finalScore = state.score / QUIZ_QUESTIONS.length;
+      scorm.setSuccessStatus(finalScore >= 0.7 ? 'passed' : 'failed');
+      scorm.setExitStatus('normal');
       return;
     }
 
@@ -212,76 +235,14 @@ export default function App() {
     }));
   };
 
-  const startChatbotSession = () => {
-    setChatMessages([
-      { role: 'ai', text: "Salut agent ! Je suis là pour t'aider à devenir un pro du repérage de fake news. Tu savais qu'il y a des astuces simples pour ne pas se faire avoir ?" }
-    ]);
-  };
 
-  const handleSendMessage = async () => {
-    if (!userInput.trim() || state.chatTurnCount >= 3) return;
-
-    const newMessages = [...chatMessages, { role: 'user' as const, text: userInput }];
-    setChatMessages(newMessages);
-    setUserInput('');
-    setIsTyping(true);
-
-    const newTurnCount = state.chatTurnCount + 1;
-
-    try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
-      const model = "gemini-3-flash-preview";
-      const response = await ai.models.generateContent({
-        model,
-        contents: [
-          { role: 'user', parts: [{ text: `L'enquêteur répond. Analyse et poursuis brièvement si ce n'est pas le dernier tour. C'est le tour ${newTurnCount} sur 3. Réponse : "${userInput}"` }] }
-        ],
-        config: {
-          systemInstruction: `Tu es VERITAS-9000, un bot qui aide les agents à déceler les fake news. Parle simplement, comme à un ami. 
-          Utilise ces points pour conseiller l'utilisateur durant la conversation (3 tours max) :
-          - Observer les détails : titres accrocheurs (MAJUSCULES, !!!), absence de dates ou lieux précis.
-          - Vérifier la source : réputation du site, attention aux sites parodiques (Gorafi, Nord Presse). Utiliser Décodex du Monde si besoin.
-          - Sources fiables : privilégier .gouv.fr, .org, .asso.fr (ministères, ONG, sciences). Vigilance sur les blogs.
-          - Varier les sources : comparer plusieurs articles. Si plusieurs sites sérieux disent la même chose, c'est bon signe.
-          - Images : faire une recherche inversée (Google images, Tineye) pour voir si l'image est détournée.
-          
-          Reste très court (max 2 phrases). Sois sympa et encourageant.`
-        }
-      });
-
-      const aiText = response.text || "C'est un point de vue très intéressant.";
-      
-      if (newTurnCount >= 3) {
-        setChatMessages([...newMessages, { role: 'ai', text: aiText + " Merci pour cet échange enrichissant ! Reprenons maintenant notre analyse." }]);
-        setTimeout(() => {
-          setState(prev => ({ ...prev, currentStep: 'quiz', currentQuestionIndex: prev.currentQuestionIndex + 1, chatTurnCount: 0 }));
-        }, 3000);
-      } else {
-        setChatMessages([...newMessages, { role: 'ai', text: aiText }]);
-      }
-    } catch (error: any) {
-      console.error(error);
-      if (error?.message?.includes('429') || error?.message?.includes('quota') || error?.status === 429) {
-        setApiKeyError(true);
-      }
-      setChatMessages([...newMessages, { role: 'ai', text: "Désolé, j'ai eu une petite absence. Continuons l'enquête !" }]);
-      if (newTurnCount >= 3) {
-        setTimeout(() => {
-          setState(prev => ({ ...prev, currentStep: 'quiz', currentQuestionIndex: prev.currentQuestionIndex + 1, chatTurnCount: 0 }));
-        }, 2000);
-      }
-    } finally {
-      setIsTyping(false);
-      setState(prev => ({ ...prev, chatTurnCount: newTurnCount }));
-    }
-  };
 
   const renderIntro = () => (
     <motion.div 
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, scale: 0.95 }}
-      className="max-w-4xl w-full text-center space-y-8"
+      className="max-w-4xl w-full text-center space-y-8 relative z-10"
     >
       <div className="relative inline-block">
         <motion.div 
@@ -500,85 +461,6 @@ export default function App() {
     </motion.div>
   );
 
-  const renderChatbot = () => (
-    <motion.div 
-      initial={{ opacity: 0, scale: 0.95 }}
-      animate={{ opacity: 1, scale: 1 }}
-      className="max-w-2xl w-full h-[650px] bg-white/5 backdrop-blur-2xl rounded-[40px] border border-white/10 flex flex-col overflow-hidden shadow-2xl"
-    >
-      <div className="p-6 border-b border-white/10 bg-white/5 flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <div className="w-12 h-12 bg-indigo-600 rounded-2xl flex items-center justify-center shadow-lg shadow-indigo-600/20">
-            <Cpu className="w-7 h-7 text-white" />
-          </div>
-          <div>
-            <h3 className="text-white font-bold text-lg leading-none">VERITAS-9000</h3>
-            <span className="text-[10px] text-indigo-400 font-mono uppercase tracking-widest">Interface de Mission • {3 - state.chatTurnCount} cycles restants</span>
-          </div>
-        </div>
-        <button 
-          onClick={() => setState(prev => ({ ...prev, currentStep: 'quiz', currentQuestionIndex: prev.currentQuestionIndex + 1, chatTurnCount: 0 }))}
-          onMouseEnter={playHoverSound}
-          className="px-4 py-2 bg-white/5 hover:bg-white/10 rounded-full border border-white/10 text-[10px] font-mono text-zinc-400 hover:text-white transition-all uppercase tracking-widest"
-        >
-          Passer l'entretien →
-        </button>
-      </div>
-
-      <div className="flex-1 overflow-y-auto p-8 space-y-6 scrollbar-hide">
-        {chatMessages.map((msg, i) => (
-          <motion.div 
-            key={i}
-            initial={{ opacity: 0, y: 20, scale: 0.9 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-          >
-            <div className={`
-              max-w-[85%] p-5 rounded-3xl text-base leading-relaxed shadow-xl
-              ${msg.role === 'user' 
-                ? 'bg-indigo-600 text-white rounded-tr-none' 
-                : 'bg-white/10 text-zinc-100 rounded-tl-none border border-white/5'}
-            `}>
-              {msg.text}
-            </div>
-          </motion.div>
-        ))}
-        {isTyping && (
-          <div className="flex justify-start">
-            <div className="bg-white/10 p-5 rounded-3xl rounded-tl-none flex gap-2">
-              <motion.div animate={{ scale: [1, 1.5, 1] }} transition={{ repeat: Infinity, duration: 1 }} className="w-2 h-2 bg-indigo-400 rounded-full" />
-              <motion.div animate={{ scale: [1, 1.5, 1] }} transition={{ repeat: Infinity, duration: 1, delay: 0.2 }} className="w-2 h-2 bg-indigo-400 rounded-full" />
-              <motion.div animate={{ scale: [1, 1.5, 1] }} transition={{ repeat: Infinity, duration: 1, delay: 0.4 }} className="w-2 h-2 bg-indigo-400 rounded-full" />
-            </div>
-          </div>
-        )}
-        <div ref={chatEndRef} />
-      </div>
-
-      <div className="p-6 bg-black/40 border-t border-white/10">
-        <div className="relative">
-          <input 
-            type="text"
-            value={userInput}
-            onChange={(e) => setUserInput(e.target.value)}
-            onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
-            placeholder={state.chatTurnCount >= 3 ? "Analyse terminée..." : "Transmission..."}
-            disabled={state.chatTurnCount >= 3 || isTyping}
-            className="w-full bg-white/5 border border-white/10 rounded-2xl py-4 px-6 pr-14 text-white text-base focus:outline-none focus:border-indigo-500 transition-all placeholder:text-zinc-600"
-          />
-          <button 
-            onClick={handleSendMessage}
-            onMouseEnter={playHoverSound}
-            disabled={state.chatTurnCount >= 3 || isTyping}
-            className="absolute right-3 top-1/2 -translate-y-1/2 p-3 text-indigo-400 hover:text-indigo-300 transition-colors disabled:opacity-30 cursor-pointer"
-          >
-            <Send className="w-6 h-6" />
-          </button>
-        </div>
-      </div>
-    </motion.div>
-  );
-
   const renderResults = () => (
     <motion.div 
       initial={{ opacity: 0, scale: 0.9 }}
@@ -642,8 +524,12 @@ export default function App() {
 
   const handleSelectKey = async () => {
     if (window.aistudio) {
-      await window.aistudio.openSelectKey();
-      setApiKeyError(false);
+      try {
+        await window.aistudio.openSelectKey();
+        setApiKeyError(false);
+      } catch (error) {
+        console.error("Failed to open select key dialog", error);
+      }
     }
   };
 
@@ -700,21 +586,43 @@ export default function App() {
       </AnimatePresence>
 
       {/* Background Atmosphere */}
-      <div className="fixed inset-0 overflow-hidden pointer-events-none">
+      <div className="fixed inset-0 overflow-hidden pointer-events-none z-0">
+        {/* Base Background Color */}
         <motion.div 
           animate={{ backgroundColor: `hsl(${state.bgHue}, 60%, 8%)` }}
-          className="absolute inset-0 transition-colors duration-1000"
+          className="absolute inset-0 z-0 transition-colors duration-1000"
         />
+
+        {/* Background Video (Intro Only) */}
+        {state.currentStep === 'intro' && (
+          <div className="absolute inset-0 z-0 overflow-hidden">
+            <video
+              ref={videoRef}
+              autoPlay
+              muted
+              loop
+              playsInline
+              src="https://onlineformapro.com/videos/onl-video.mp4"
+              className="w-full h-full object-cover"
+              poster="https://images.unsplash.com/photo-1550751827-4bd374c3f58b?auto=format&fit=crop&q=80&w=1920"
+            />
+            <div className="absolute inset-0 bg-black/40 z-10" />
+          </div>
+        )}
+
+        {/* Decorative Glows */}
         <motion.div 
           animate={{ backgroundColor: `hsl(${state.bgHue}, 80%, 25%)` }}
-          className="absolute top-[-10%] left-[-10%] w-[70%] h-[70%] rounded-full blur-[120px] opacity-35 transition-colors duration-1000"
+          className="absolute top-[-10%] left-[-10%] w-[70%] h-[70%] rounded-full blur-[120px] opacity-35 z-20 transition-colors duration-1000"
         />
         <motion.div 
           animate={{ backgroundColor: `hsl(${(state.bgHue + 60) % 360}, 80%, 25%)` }}
-          className="absolute bottom-[-10%] right-[-10%] w-[70%] h-[70%] rounded-full blur-[120px] opacity-25 transition-colors duration-1000"
+          className="absolute bottom-[-10%] right-[-10%] w-[70%] h-[70%] rounded-full blur-[120px] opacity-25 z-20 transition-colors duration-1000"
         />
-        <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-20 mix-blend-overlay" />
-        <div className="absolute inset-0 bg-gradient-to-b from-transparent via-black/10 to-black/40" />
+        
+        {/* Texture Overlays */}
+        <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-20 mix-blend-overlay z-30" />
+        <div className="absolute inset-0 bg-gradient-to-b from-transparent via-black/10 to-black/40 z-30" />
       </div>
 
       {/* Header */}
@@ -749,7 +657,6 @@ export default function App() {
           {state.currentStep === 'intro' && renderIntro()}
           {state.currentStep === 'story' && renderStory()}
           {state.currentStep === 'quiz' && renderQuiz()}
-          {state.currentStep === 'chatbot' && renderChatbot()}
           {state.currentStep === 'results' && renderResults()}
         </AnimatePresence>
       </main>
