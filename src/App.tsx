@@ -164,6 +164,27 @@ export default function App() {
       const scaledScore = rawScore / totalQuestions;
       scorm.setScore(rawScore, 0, totalQuestions, scaledScore);
 
+      // Update SCORM Objective "Fake News"
+      scorm.setObjective("Fake News", scaledScore, scaledScore >= 0.7 ? "passed" : "failed");
+
+      // Record SCORM Interaction
+      const learnerResponse = currentQuestion.type === QuestionType.TRUE_FALSE 
+        ? (answer ? "true" : "false")
+        : (currentQuestion.choices?.find(c => c.id === answer)?.text || answer.toString());
+      
+      const correctAnswer = currentQuestion.type === QuestionType.TRUE_FALSE
+        ? (currentQuestion.correctAnswer ? "true" : "false")
+        : (currentQuestion.choices?.find(c => c.isCorrect)?.text || "");
+
+      scorm.recordInteraction(
+        `q_${currentQuestion.id}`,
+        currentQuestion.type === QuestionType.TRUE_FALSE ? "true-false" : "choice",
+        currentQuestion.text,
+        learnerResponse,
+        isCorrect ? "correct" : "incorrect",
+        correctAnswer
+      );
+
       return updatedState;
     });
 

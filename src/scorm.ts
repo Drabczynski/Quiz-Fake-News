@@ -141,6 +141,40 @@ class Scorm2004 {
     this.set("cmi.exit", status);
     this.commit();
   }
+
+  public setObjective(id: string, score: number, status: "passed" | "failed" | "unknown") {
+    // SCORM 2004 objectives use a collection
+    // We'll use index 0 for our unique objective
+    this.set("cmi.objectives.0.id", id);
+    this.set("cmi.objectives.0.score.scaled", score.toString());
+    this.set("cmi.objectives.0.success_status", status);
+    this.commit();
+  }
+
+  public recordInteraction(
+    id: string,
+    type: "true-false" | "choice" | "fill-in" | "long-fill-in" | "matching" | "performance" | "sequencing" | "likert" | "numeric" | "other",
+    description: string,
+    learnerResponse: string,
+    result: "correct" | "incorrect" | "unanticipated" | "neutral" | number,
+    correctResponse?: string
+  ) {
+    // Find the next available interaction index
+    const count = parseInt(this.get("cmi.interactions._count") || "0");
+    const index = count.toString();
+
+    this.set(`cmi.interactions.${index}.id`, id);
+    this.set(`cmi.interactions.${index}.type`, type);
+    this.set(`cmi.interactions.${index}.description`, description);
+    this.set(`cmi.interactions.${index}.learner_response`, learnerResponse);
+    this.set(`cmi.interactions.${index}.result`, result.toString());
+    if (correctResponse) {
+      this.set(`cmi.interactions.${index}.correct_responses.0.pattern`, correctResponse);
+    }
+    this.set(`cmi.interactions.${index}.timestamp`, new Date().toISOString());
+    
+    this.commit();
+  }
 }
 
 export const scorm = new Scorm2004();
