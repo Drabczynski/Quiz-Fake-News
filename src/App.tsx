@@ -516,7 +516,6 @@ export default function App() {
               playsInline
               src="https://onlineformapro.com/videos/onl-video.mp4"
               className="w-full h-full object-cover"
-              poster="https://images.unsplash.com/photo-1550751827-4bd374c3f58b?auto=format&fit=crop&q=80&w=1920"
             />
             <div className="absolute inset-0 bg-black/40 z-10" />
           </div>
